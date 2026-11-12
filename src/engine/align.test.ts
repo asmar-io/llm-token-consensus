@@ -23,19 +23,18 @@ describe("toProbs", () => {
 });
 
 describe("overlap", () => {
-  it("implements exact / prefix / extension with length damping", () => {
+  it("is exact string match only: no credit between cuts of different length", () => {
     expect(overlap(" dec", " dec")).toBe(1);
-    expect(overlap(" decentral", " dec")).toBeCloseTo(4 / 10); // t starts with c
-    expect(overlap(" dec", " decentral")).toBeCloseTo(4 / 10); // c starts with t
+    expect(overlap(" decentral", " dec")).toBe(0);
+    expect(overlap(" dec", " decentral")).toBe(0);
+    expect(overlap("'t", "'")).toBe(0); // "shouldn' be" regression
+    expect(overlap(" can", " cans")).toBe(0); // "cans undermine trusts" regression
     expect(overlap(" dog", " dec")).toBe(0);
   });
   it("EOS only matches EOS, even against a literal prefix of the sentinel string", () => {
     expect(overlap(EOS, EOS)).toBe(1);
     expect(overlap("<|", EOS)).toBe(0);
     expect(overlap(EOS, "<|")).toBe(0);
-  });
-  it("counts code points, not UTF-16 units", () => {
-    expect(overlap("😀ab", "😀")).toBeCloseTo(1 / 3);
   });
 });
 
@@ -51,19 +50,19 @@ describe("alignVoice", () => {
     expect(buildCandidates([[{ token: "", p: 1 }]], ["", "x"])).toEqual(["x"]);
   });
 
-  it("renormalises over the candidate set and spreads mass across cuts", () => {
-    const P = alignVoice([{ token: " decentralised", p: 0.9 }], cands);
-    const total = [...P.values()].reduce((a, b) => a + b, 0);
-    expect(total).toBeCloseTo(1);
-    expect(P.get(" decentralised")!).toBeGreaterThan(P.get(" decentral")!);
-    expect(P.get(" decentral")!).toBeGreaterThan(P.get(" dec")!);
-    expect(P.get(EOS)).toBe(0);
+  it("renormalises a voice's own tokens over the candidate set", () => {
+    const P = alignVoice([{ token: " dec", p: 0.5 }, { token: EOS, p: 0.25 }], cands);
+    expect(P.get(" dec")).toBeCloseTo(2 / 3);
+    expect(P.get(EOS)).toBeCloseTo(1 / 3);
+    expect(P.get(" decentral")).toBe(0);
+    expect(P.get(" decentralised")).toBe(0);
   });
 
-  it("damps a whitespace-only candidate so it cannot hoover up every spaced token", () => {
-    const c = buildCandidates([[{ token: " ", p: 0.1 }], [{ token: " banana", p: 0.9 }]]);
-    const P = alignVoice([{ token: " banana", p: 0.9 }], c);
-    expect(P.get(" banana")!).toBeGreaterThan(5 * P.get(" ")!);
+  it("one voice's rare longer token cannot borrow another voice's mass", () => {
+    const c = buildCandidates([[{ token: " can", p: 0.99 }], [{ token: " cans", p: 0.01 }, { token: " can", p: 0.9 }]]);
+    const P = alignVoice([{ token: " can", p: 0.99 }], c);
+    expect(P.get(" can")).toBeCloseTo(1);
+    expect(P.get(" cans")).toBe(0);
   });
 
   it("returns zeros, not NaN, when nothing lines up", () => {

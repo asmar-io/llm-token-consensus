@@ -1,97 +1,98 @@
 /**
- * Live voices: one OpenRouter model = one Voice. Each `next()` asks the model
- * for exactly one next token with its top-20 logprobs, continuing the answer
- * the choir has written so far.
+ * Live voices: one OpenRouter model = one Voice. Each `next()` returns the
+ * model's distribution over the next piece of the answer written so far.
  *
- * ENDPOINT CHOICE (docs checked 2026-11-12)
- *   POST /api/v1/chat/completions with assistant prefill:
- *     messages = [system?, user: prompt, assistant: textSoFar]   (no assistant
- *     message on the first step), max_tokens 1, logprobs true, top_logprobs 20.
- *   - Prefill is a documented OpenRouter feature: "include a message with
- *     role: 'assistant' at the end of your messages array" and the model
- *     completes it. No extra flag is documented (the OpenAPI spec has no
- *     `continue_final_message` / `add_generation_prompt` parameter).
- *     https://openrouter.ai/docs/api_reference/overview.md#assistant-prefill
- *   - The legacy text completions endpoint (/api/v1/completions, `prompt`)
- *     is still listed in each model's `endpoints` array in /api/v1/models,
- *     but it is NOT in the current OpenAPI spec (https://openrouter.ai/openapi.json
- *     lists /chat/completions and no /completions). Using it would also mean
- *     reproducing every model's chat template by hand (Llama 3 headers,
- *     ChatML, Gemma turns, Mistral [INST], DeepSeek fullwidth-bar tokens);
- *     any template drift silently degrades the distribution. Chat + prefill
- *     lets the provider apply the right template. Trade-off: whether each
- *     provider really continues the final assistant message (rather than
- *     closing it and starting a new turn) cannot be confirmed without a key;
- *     scripts/live-smoke.mjs checks it per model.
+ * WHAT WAS MEASURED (live, 2026-11-12; details in catalog.ts and the report)
+ *   POST /api/v1/chat/completions with messages [user: prompt, assistant:
+ *   textSoFar] is the documented prefill shape
+ *   (https://openrouter.ai/docs/api_reference/overview.md#assistant-prefill),
+ *   but on nearly every provider the assistant message is closed and a fresh
+ *   reply begins. Probed with prompt "Count from one to ten in words" and
+ *   so-far "one two three four": a continuation must say " five"; a fresh
+ *   reply says "one" / "It" / "five" (no space). Only these continued:
+ *     - DeepSeek V4 on StreamLake / Novita: plain prefill + reasoning off
+ *     - Kimi K2.6 on Moonshot AI: prefill message marked `partial: true`
+ *     - Qwen3.x on Alibaba: prefill message marked `partial: true`
+ *   The legacy /api/v1/completions endpoint (not in the OpenAPI spec) wraps
+ *   `prompt` in the chat template on every provider tested (raw "one two three
+ *   four five six" -> "seven", no space), so raw templates are not an option.
+ *   Each voice is therefore PINNED to the providers it was verified on
+ *   (provider.order + allow_fallbacks false + require_parameters), with its
+ *   own flags; see VoiceRoute in catalog.ts.
  *
- * PROVIDER ROUTING
- *   A model's `supported_parameters` in the model list is a union over its
- *   providers; only some providers honour logprobs. We send
- *   provider.require_parameters = true ("the request won't even be routed to
- *   that provider", https://openrouter.ai/docs/guides/routing/provider-selection.md)
- *   and keep allow_fallbacks (default true) so OpenRouter can fall back among
- *   the remaining logprobs-capable providers. A response that still comes
- *   back without logprobs is rejected with a clear error, never turned into
- *   an empty distribution.
+ * TOKEN HEALING (mid-word)
+ *   A prefill ending mid-word ("...is Par") is tokenised unnaturally, and even
+ *   a true continuation then goes astray ("Par" -> "ís", i.e. "París", 91%).
+ *   When the text ends in a letter/digit we send two requests in parallel:
+ *     A: prefill = full text            -> what follows if the word is done
+ *     B: prefill = text minus last word -> the model re-picks that word
+ *   B's candidates that extend the held-back word (" Paris" for " Par") give
+ *   "is"; B's mass on exactly the held word (" Par") is the chance the word is
+ *   finished, and scales A. Measured: "Par" -> "is" 100% for all voices,
+ *   "one two three four" -> " five" 100% (B puts ~1.0 on " four").
+ *   If one of the two requests fails, the other is used alone.
  *
  * WHITESPACE
- *   Chat templates / providers may trim trailing whitespace from the prefill
- *   ("Hello " -> "Hello"), which changes whether the next token should carry
- *   a leading space. We never send a prefill that ends in whitespace:
- *   textSoFar is split into head (trimEnd) + tail (trailing whitespace) and
- *   only head is sent. Candidates are continuations of head, so a candidate
- *   is kept only if it starts with tail, and tail is stripped from it
- *   (" world" with tail " " -> "world"). Candidates that do not start with
- *   tail contradict text already emitted and are dropped, as are candidates
- *   that are only (part of) the tail. If nothing survives, we retry once with
- *   the untrimmed prefill.
+ *   Measured: a prefill ending in a space confuses DeepSeek on StreamLake
+ *   ("four " -> "五" 30%, EOS 18%, " five" 8%); Moonshot and Alibaba trim it.
+ *   So a prefill never ends in whitespace: the trailing whitespace is held
+ *   back, only candidates starting with it are kept, and it is stripped from
+ *   them. If nothing survives, one retry with the untrimmed text.
+ *   Note: message.content is sometimes left-trimmed (Novita returns "five"
+ *   for the token " five"); token strings in logprobs are authoritative.
  *
  * END OF SEQUENCE
- *   - A candidate that is a known end token (<|eot_id|>, <|im_end|>, </s>,
- *     <|end|>, <|endoftext|>, <end_of_turn>, <eos>, DeepSeek's
- *     <｜end▁of▁sentence｜>, ...) or the empty string (providers that skip
- *     special tokens render the stop token as "") maps to EOS with its own
- *     logprob. Other special tokens (<|im_start|>, ...) are dropped.
- *   - finish_reason "stop" with empty content and NO logprob entries: the
- *     provider stopped without reporting the stop token; we return EOS as the
- *     only candidate with logprob 0 (its true probability is unknown).
- *   - Duplicates after mapping are merged by summing probabilities.
+ *   - End tokens in the candidate list (<｜end▁of▁sentence｜>, <|im_end|>,
+ *     <|eot_id|>, </s>, <end_of_turn>, ...) and "" map to EOS; duplicates merge
+ *     (probabilities summed). Other special tokens are dropped.
+ *   - Measured: when the model's choice IS the end token, every verified
+ *     provider returns finish_reason "stop", empty content, NO logprobs and
+ *     often no usage. With temperature 0 that means EOS is the argmax; we
+ *     return EOS with logprob 0 (its exact probability is not reported).
  *
- * PARTIAL UTF-8
- *   Logprob entries carry `bytes` (UTF-8 bytes of the token). A candidate
- *   whose bytes are not valid standalone UTF-8 (or, without bytes, whose
- *   token string contains U+FFFD, a lone surrogate or OpenAI's "bytes:\x.."
- *   form) cannot be appended and is dropped. If the voice's BEST candidate is
- *   such a partial character, we make one follow-up request (max_tokens 4,
- *   temperature 0), check that its first token is that same partial token,
- *   and concatenate token bytes until they decode; the decoded text becomes
- *   one candidate carrying the first token's logprob. If the follow-up fails
- *   or does not match, the partial candidate is just dropped.
+ * BYTES / PARTIAL UTF-8
+ *   Measured: `bytes` is unreliable (StreamLake returns code points, Novita
+ *   returned corrupted Arabic bytes, Alibaba returns the bytes of U+FFFD for
+ *   partial tokens). So the token STRING is authoritative; bytes are used only
+ *   to repair a string that is not valid text. Candidates that are not valid
+ *   text (U+FFFD, lone surrogates, "bytes:\x..", vLLM's "token:123") are
+ *   dropped. If the best candidate is such a partial character, or the
+ *   provider returned no logprobs because the chosen token is one (measured
+ *   with an emoji answer), one follow-up with max_tokens 4 completes the
+ *   character from message.content and returns it as one candidate (with the
+ *   partial token's probability when known, else logprob 0). Kimi returned
+ *   null content for an emoji answer; that step then fails cleanly.
+ *
+ * REQUEST
+ *   max_tokens 1, logprobs, top_logprobs 20 (5 on Alibaba, its cap),
+ *   temperature 0 (measured: logprobs are the same at temperature 1 and 1.5,
+ *   so they are pre-temperature; 0 makes the sampled token the argmax),
+ *   reasoning { enabled: false } where the route says so.
  *
  * USAGE / COST
- *   OpenRouter returns usage on every non-streaming response, including
- *   `usage.cost` in credits (= USD)
- *   (https://openrouter.ai/docs/cookbook/administration/usage-accounting.md).
- *   costUsd uses usage.cost when present, else tokens x catalog pricing.
- *   Follow-up requests are added to the step's totals.
+ *   usage.cost (credits = USD) when present; else tokens x catalog pricing.
+ *   All requests of a step (healing pair, follow-ups, retries) are summed.
  *
  * ERRORS
- *   Per-request timeout (20 s), ctx.signal honoured, one retry on
- *   408/429/5xx or a network error with a short backoff (Retry-After honoured,
- *   capped at 2 s). Errors arrive either as an HTTP status or as a 200 body
- *   carrying `error` (https://openrouter.ai/docs/api_reference/errors-and-debugging.md).
- *   The API key is read only from process.env.OPENROUTER_API_KEY and is
- *   never logged or put in an error message.
+ *   20 s timeout per request, ctx.signal honoured, one retry on
+ *   408/429/5xx/network error (Retry-After honoured, capped at 2 s). Errors
+ *   name the model, HTTP status and provider. A response without logprobs
+ *   (that is not an end-of-sequence or partial-character case) is an error,
+ *   never an empty distribution. The key is read only from
+ *   process.env.OPENROUTER_API_KEY and never logged.
  */
-import { EOS, type VoiceInfo } from "@/lib/protocol";
+import { EOS } from "@/lib/protocol";
 import type { Voice, VoiceContext, VoiceDistribution } from "@/engine/voice";
-import { resolveChoir } from "@/engine/voices/catalog";
+import { resolveChoir, toVoiceInfo, type CatalogEntry, type VoiceRoute } from "@/engine/voices/catalog";
 
 export const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
-export const TOP_LOGPROBS = 20;
 export const REQUEST_TIMEOUT_MS = 20_000;
+const DEFAULT_TOP_LOGPROBS = 20;
+const MAX_CANDIDATES = 20;
 const RETRY_DELAY_MS = 400;
 const MAX_RETRY_AFTER_MS = 2_000;
+/** B's consistent mass at or above which the healed distribution is used as is. */
+const HEAL_FULL_TRUST = 0.25;
 const FOLLOWUP_MAX_TOKENS = 4;
 
 /** Known end-of-turn / end-of-text tokens across chat templates. */
@@ -112,6 +113,8 @@ export const END_TOKENS: ReadonlySet<string> = new Set([
 
 /** Any other special-looking token, e.g. <|im_start|>, <start_of_turn>, <｜Assistant｜>. */
 const SPECIAL_TOKEN = /^(<\|[^<>|\s]+\|>|<｜[^<>\s]+｜>|<(start|end)_of_[a-z_]+>)$/;
+/** Last word of the text (with the whitespace before it), for token healing. */
+const WORD_TAIL = /\s*[\p{L}\p{M}\p{N}]+(?:['’-][\p{L}\p{M}\p{N}]+)*$/u;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -124,7 +127,7 @@ export function liveAvailable(): boolean {
 /** The default live choir (or CHORUS_MODELS). Empty when liveAvailable() is false. */
 export function createLiveVoices(): Voice[] {
   if (!liveAvailable()) return [];
-  return resolveChoir().map((info) => createOpenRouterVoice(info));
+  return resolveChoir().map((entry) => createOpenRouterVoice(entry));
 }
 
 export interface OpenRouterVoiceOptions {
@@ -134,9 +137,9 @@ export interface OpenRouterVoiceOptions {
   retryDelayMs?: number;
 }
 
-export function createOpenRouterVoice(info: VoiceInfo, opts: OpenRouterVoiceOptions = {}): Voice {
-  const client = new Client(info, opts.timeoutMs ?? REQUEST_TIMEOUT_MS, opts.retryDelayMs ?? RETRY_DELAY_MS);
-  return { info, next: (ctx) => client.next(ctx) };
+export function createOpenRouterVoice(entry: CatalogEntry, opts: OpenRouterVoiceOptions = {}): Voice {
+  const client = new Client(entry, opts.timeoutMs ?? REQUEST_TIMEOUT_MS, opts.retryDelayMs ?? RETRY_DELAY_MS);
+  return { info: toVoiceInfo(entry), next: (ctx) => client.next(ctx) };
 }
 
 // ---------------------------------------------------------------------------
@@ -161,8 +164,7 @@ interface ChatResponse {
   provider?: string;
   choices?: {
     finish_reason?: string | null;
-    native_finish_reason?: string | null;
-    message?: { content?: string | null; role?: string; reasoning?: string | null };
+    message?: { content?: string | null; role?: string };
     logprobs?: { content?: TokenLogprob[] | null } | null;
     error?: ApiError;
   }[];
@@ -177,109 +179,140 @@ interface Usage {
   costUsd: number;
 }
 
-type Cand = { token: string; logprob: number };
+/** Candidate in probability space (internal). */
+type Cand = { token: string; p: number };
+
+/** One request's view, relative to a held-back suffix of the text. */
+interface Partial1 {
+  /** Continuations beyond the held-back text (held stripped). */
+  list: Cand[];
+  /** Mass on candidates equal to the held-back text exactly. */
+  exact: number;
+  /** Mass on all candidates consistent with the held-back text. */
+  consistent: number;
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
 
-/** Split "Hello world \n" into head "Hello world" and tail " \n". */
-export function splitTrailingWhitespace(text: string): { head: string; tail: string } {
-  const head = text.replace(/\s+$/u, "");
-  return { head, tail: text.slice(head.length) };
-}
-
 export function buildRequestBody(
   model: string,
+  route: VoiceRoute,
   ctx: Pick<VoiceContext, "system" | "prompt">,
   prefill: string,
-  extra: { maxTokens?: number; temperature?: number } = {},
+  maxTokens = 1,
 ): Record<string, unknown> {
-  const messages: { role: string; content: string }[] = [];
+  const messages: Record<string, unknown>[] = [];
   if (ctx.system) messages.push({ role: "system", content: ctx.system });
   messages.push({ role: "user", content: ctx.prompt });
-  if (prefill) messages.push({ role: "assistant", content: prefill });
+  if (prefill) {
+    messages.push(route.partial ? { role: "assistant", content: prefill, partial: true } : { role: "assistant", content: prefill });
+  }
   const body: Record<string, unknown> = {
     model,
     messages,
-    max_tokens: extra.maxTokens ?? 1,
+    max_tokens: maxTokens,
     logprobs: true,
-    top_logprobs: TOP_LOGPROBS,
+    top_logprobs: route.topLogprobs ?? DEFAULT_TOP_LOGPROBS,
+    temperature: 0,
     stream: false,
-    provider: { require_parameters: true, allow_fallbacks: true },
+    provider:
+      route.providers.length > 0
+        ? { order: route.providers, allow_fallbacks: false, require_parameters: true }
+        : { require_parameters: true },
   };
-  if (extra.temperature !== undefined) body.temperature = extra.temperature;
+  if (route.reasoningOff) body.reasoning = { enabled: false };
   return body;
 }
 
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-/** A candidate's text, or null when it is not valid standalone UTF-8. */
+function validText(t: string): boolean {
+  return !t.includes("�") && !LONE_SURROGATE.test(t) && !t.startsWith("bytes:") && !/^token:\d+$/.test(t);
+}
+
+/**
+ * A candidate's text, or null when it is not valid standalone text. The token
+ * string is authoritative; bytes only repair a string that is not valid text.
+ */
 export function candidateText(c: TopLogprob): string | null {
-  if (Array.isArray(c.bytes) && c.bytes.length > 0) {
+  const t = c.token ?? "";
+  if (validText(t)) return t;
+  if (Array.isArray(c.bytes) && c.bytes.length > 0 && c.bytes.every((b) => Number.isInteger(b) && b >= 0 && b < 256)) {
     try {
-      return utf8.decode(new Uint8Array(c.bytes));
+      const s = utf8.decode(new Uint8Array(c.bytes));
+      return validText(s) ? s : null;
     } catch {
       return null;
     }
   }
-  const t = c.token ?? "";
-  if (t.startsWith("bytes:") || t.includes("�") || LONE_SURROGATE.test(t)) return null;
-  return t;
+  return null;
 }
 
-type Classified =
-  | { kind: "text"; text: string; logprob: number }
-  | { kind: "eos"; logprob: number }
-  | { kind: "partial"; logprob: number; raw: TopLogprob }
-  | { kind: "drop"; logprob: number };
+export type Classified =
+  | { kind: "text"; text: string }
+  | { kind: "eos" }
+  | { kind: "partial" }
+  | { kind: "drop" };
 
-export function classify(c: TopLogprob, tail: string): Classified {
-  const lp = c.logprob;
+export function classify(c: TopLogprob): Classified {
   const tok = c.token ?? "";
-  if (END_TOKENS.has(tok) || tok === "") return { kind: "eos", logprob: lp };
-  if (SPECIAL_TOKEN.test(tok)) return { kind: "drop", logprob: lp };
+  if (END_TOKENS.has(tok) || tok === "") return { kind: "eos" };
+  if (SPECIAL_TOKEN.test(tok)) return { kind: "drop" };
   const text = candidateText(c);
-  if (text === null) return { kind: "partial", logprob: lp, raw: c };
-  if (END_TOKENS.has(text) || text === "") return { kind: "eos", logprob: lp };
-  const stripped = stripTail(text, tail);
-  if (stripped === null) return { kind: "drop", logprob: lp };
-  return { kind: "text", text: stripped, logprob: lp };
+  if (text === null) return { kind: "partial" };
+  if (text === "") return { kind: "eos" };
+  return { kind: "text", text };
 }
 
-/** Remove the held-back whitespace from a continuation; null if inconsistent or empty. */
-function stripTail(text: string, tail: string): string | null {
-  if (!tail) return text;
-  if (!text.startsWith(tail)) return null;
-  const rest = text.slice(tail.length);
-  return rest === "" ? null : rest;
-}
-
-function logSumExp(a: number, b: number): number {
-  if (a === -Infinity) return b;
-  if (b === -Infinity) return a;
-  const m = Math.max(a, b);
-  return m + Math.log(Math.exp(a - m) + Math.exp(b - m));
-}
-
-/** Merge duplicate tokens (sum of probabilities) and sort best first. */
-export function mergeCandidates(list: Cand[]): Cand[] {
+/** Merge duplicates (sum of probabilities), best first, as natural-log logprobs. */
+export function finalize(list: Cand[]): { token: string; logprob: number }[] {
   const acc = new Map<string, number>();
-  for (const { token, logprob } of list) {
-    if (typeof logprob !== "number" || Number.isNaN(logprob)) continue;
-    acc.set(token, logSumExp(acc.get(token) ?? -Infinity, logprob));
+  for (const { token, p } of list) {
+    if (!(p > 0)) continue;
+    acc.set(token, (acc.get(token) ?? 0) + p);
   }
   return [...acc.entries()]
-    .map(([token, logprob]) => ({ token, logprob }))
-    .sort((x, y) => y.logprob - x.logprob);
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_CANDIDATES)
+    .map(([token, p]) => ({ token, logprob: Math.log(Math.min(p, 1)) }));
 }
 
-function sameToken(a: TopLogprob, b: TopLogprob): boolean {
-  if (Array.isArray(a.bytes) && Array.isArray(b.bytes)) {
-    const bb = b.bytes;
-    return a.bytes.length === bb.length && a.bytes.every((x, i) => x === bb[i]);
-  }
-  return a.token === b.token;
+/**
+ * A provider that ignores the prefill answers from scratch, so its top
+ * candidate is the answer's own first piece glued straight onto a word
+ * ("...harm to someone or" -> "Yes"). Measured on StreamLake 2026-11-12 (4 of
+ * 50 requests). Such a ballot would corrupt the text, so the voice sits out.
+ */
+export function looksLikeRestart(textSoFar: string, best: { token: string; logprob: number }): boolean {
+  const t = best.token;
+  if (textSoFar.length < 12 || t.length < 2 || t === EOS) return false;
+  if (best.logprob < Math.log(0.5)) return false;
+  if (!/^[\p{L}\p{N}]/u.test(t) || !/[\p{L}\p{N}]$/u.test(textSoFar)) return false;
+  return textSoFar.startsWith(t);
+}
+
+/** Combine token-healing requests A (full text) and B (last word held back). */
+export function combineHealing(a: Partial1, b: Partial1): Cand[] {
+  if (!(b.consistent > 0)) return a.list;
+  const z = b.consistent;
+  const healed = [...b.list.map((c) => ({ token: c.token, p: c.p / z })), ...a.list.map((c) => ({ token: c.token, p: (c.p * b.exact) / z }))];
+  // z is how much of B's probability agrees with the word the choir actually
+  // wrote. When the voice would not have written that word, z is tiny and the
+  // ratios above are noise from the tail of its top-k: live runs on 2026-11-12
+  // produced "such asc" and "shouldn'thing" that way. Trust the healed view in
+  // proportion to z and fall back to the plain continuation (A) for the rest.
+  const trust = a.list.length === 0 ? 1 : Math.min(1, z / HEAL_FULL_TRUST);
+  if (trust >= 1) return healed;
+  return [...healed.map((c) => ({ token: c.token, p: c.p * trust })), ...a.list.map((c) => ({ token: c.token, p: c.p * (1 - trust) }))];
+}
+
+/** First character unit of a completion: up to and including its first non-ASCII code point. */
+function firstUnit(s: string): string | null {
+  const chars = Array.from(s);
+  const i = chars.findIndex((ch) => (ch.codePointAt(0) ?? 0) > 0x7f);
+  return i >= 0 ? chars.slice(0, i + 1).join("") : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -289,111 +322,155 @@ type Attempt = { ok: true; json: ChatResponse } | { ok: false; error: Error; del
 
 class Client {
   constructor(
-    private readonly info: VoiceInfo,
+    private readonly entry: CatalogEntry,
     private readonly timeoutMs: number,
     private readonly retryDelayMs: number,
   ) {}
 
   private get model() {
-    return this.info.id;
+    return this.entry.id;
   }
 
   async next(ctx: VoiceContext): Promise<VoiceDistribution> {
     const usage: Usage = { latencyMs: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
-    const { head, tail } = splitTrailingWhitespace(ctx.textSoFar);
+    const t0 = Date.now();
+    const so = ctx.textSoFar;
+    let list: Cand[];
 
-    let top = await this.step(ctx, head, tail, usage);
-    if (top.length === 0 && tail) {
-      // Holding back the whitespace left nothing usable: send it verbatim once.
-      top = await this.step(ctx, ctx.textSoFar, "", usage);
+    const tailWs = /\s+$/.exec(so)?.[0] ?? "";
+    const heal = tailWs ? "" : (WORD_TAIL.exec(so)?.[0] ?? "");
+    if (tailWs) {
+      list = (await this.single(ctx, so.slice(0, -tailWs.length), tailWs, usage)).list;
+      if (list.length === 0) list = (await this.single(ctx, so, "", usage)).list;
+    } else if (heal) {
+      const [a, b] = await Promise.allSettled([
+        this.single(ctx, so, "", usage),
+        this.single(ctx, so.slice(0, -heal.length), heal, usage),
+      ]);
+      if (ctx.signal.aborted) throw abortError(this.model, ctx.signal);
+      if (a.status === "fulfilled" && b.status === "fulfilled") list = combineHealing(a.value, b.value);
+      else if (a.status === "fulfilled") list = a.value.list;
+      else if (b.status === "fulfilled" && b.value.list.length > 0) list = combineHealing({ list: [], exact: 0, consistent: 0 }, b.value);
+      else throw a.reason;
+    } else {
+      list = (await this.single(ctx, so, "", usage)).list;
     }
-    if (top.length === 0) {
-      throw new Error(`${this.model}: no usable next-token candidates in the response`);
+
+    const top = finalize(list);
+    if (top.length === 0) throw new Error(`${this.model}: no usable next-token candidates in the response`);
+    if (looksLikeRestart(so, top[0])) {
+      throw new Error(`${this.model}: ignored the answer so far and restarted it (top candidate ${JSON.stringify(top[0].token)}); sitting this step out`);
     }
-    return { top, ...usage };
+    // Requests of a step may run in parallel: report wall time, not the sum.
+    return { top, ...usage, latencyMs: Date.now() - t0 };
   }
 
-  /** One main request (+ optional partial-UTF-8 follow-up). */
-  private async step(ctx: VoiceContext, prefill: string, tail: string, usage: Usage): Promise<Cand[]> {
-    const json = await this.post(buildRequestBody(this.model, ctx, prefill), ctx.signal, usage);
-    const choice = json.choices?.[0];
+  /** One request; candidates relative to `held` (text held back from the prefill). */
+  private async single(ctx: VoiceContext, prefill: string, held: string, usage: Usage): Promise<Partial1> {
+    const body = buildRequestBody(this.model, this.entry.route, ctx, prefill);
+    let json = await this.post(body, ctx.signal, usage);
+    let choice = json.choices?.[0];
+    // Measured: DeepSeek on StreamLake / Novita now and then returns the token
+    // without logprobs; the same request repeated returns them. Retry once.
+    if (choice && !choice.logprobs?.content?.length && choice.message?.content) {
+      json = await this.post(body, ctx.signal, usage);
+      choice = json.choices?.[0];
+    }
     if (!choice) throw new Error(`${this.model}: response has no choices${providerSuffix(json)}`);
-
     const entries = choice.logprobs?.content ?? null;
     const content = choice.message?.content ?? "";
+
     if (!entries || entries.length === 0) {
-      if (choice.finish_reason === "stop" && !content) return [{ token: EOS, logprob: 0 }];
-      throw new Error(
-        `${this.model}: response has no logprobs (the provider ignored logprobs/top_logprobs)${providerSuffix(json)}`,
-      );
+      if (choice.finish_reason === "stop" && !content) {
+        // The model's (argmax) choice was the end token.
+        return held ? { list: [], exact: 0, consistent: 0 } : { list: [{ token: EOS, p: 1 }], exact: 0, consistent: 1 };
+      }
+      if (choice.finish_reason === "length" && !content) {
+        // The chosen token is not printable on its own (part of a character).
+        const done = await this.completePartial(ctx, prefill, held, usage);
+        return done === null ? { list: [], exact: 0, consistent: 0 } : { list: [{ token: done.text, p: done.p }], exact: 0, consistent: done.p };
+      }
+      throw new Error(`${this.model}: response has no logprobs (the provider ignored logprobs)${providerSuffix(json)}`);
     }
     const first = entries[0];
     const alts = first.top_logprobs ?? [];
     if (alts.length === 0) {
-      throw new Error(
-        `${this.model}: response has no top_logprobs (the provider ignored top_logprobs)${providerSuffix(json)}`,
-      );
+      throw new Error(`${this.model}: response has no top_logprobs (the provider ignored top_logprobs)${providerSuffix(json)}`);
     }
-    // The sampled token may fall outside the top list; include it once.
-    const raw = alts.some((a) => sameToken(a, first)) ? alts : [...alts, first];
+    const raw = alts.some((a) => a.token === first.token) ? alts : [...alts, first];
 
-    const classified = raw.map((c) => classify(c, tail));
-    const out: Cand[] = [];
-    for (const c of classified) {
-      if (c.kind === "text") out.push({ token: c.text, logprob: c.logprob });
-      else if (c.kind === "eos") out.push({ token: EOS, logprob: c.logprob });
+    const out: Partial1 = { list: [], exact: 0, consistent: 0 };
+    let bestPartial = -1;
+    let bestOther = -1;
+    for (const a of raw) {
+      const p = Math.exp(a.logprob);
+      if (!Number.isFinite(p)) continue;
+      const c = classify(a);
+      if (c.kind === "drop") continue;
+      if (c.kind === "partial") {
+        bestPartial = Math.max(bestPartial, p);
+        continue;
+      }
+      bestOther = Math.max(bestOther, p);
+      if (c.kind === "eos") {
+        if (!held) {
+          out.list.push({ token: EOS, p });
+          out.consistent += p;
+        }
+        continue;
+      }
+      if (!held) {
+        out.list.push({ token: c.text, p });
+        out.consistent += p;
+      } else if (c.text === held) {
+        out.exact += p;
+        out.consistent += p;
+      } else if (c.text.startsWith(held)) {
+        out.list.push({ token: c.text.slice(held.length), p });
+        out.consistent += p;
+      }
     }
-
-    const best = classified.filter((c) => c.kind !== "drop").sort((a, b) => b.logprob - a.logprob)[0];
-    if (best?.kind === "partial") {
-      const completed = await this.completePartial(ctx, prefill, tail, best.raw, usage);
-      if (completed !== null) out.push({ token: completed, logprob: best.logprob });
+    if (bestPartial > bestOther) {
+      const done = await this.completePartial(ctx, prefill, held, usage);
+      if (done) {
+        out.list.push({ token: done.text, p: bestPartial });
+        out.consistent += bestPartial;
+      }
     }
-    return mergeCandidates(out);
+    return out;
   }
 
-  /** Follow-up for a best candidate that is only part of a multi-byte character. */
+  /** Follow-up that completes a character split across tokens; text relative to `held`. */
   private async completePartial(
     ctx: VoiceContext,
     prefill: string,
-    tail: string,
-    partial: TopLogprob,
+    held: string,
     usage: Usage,
-  ): Promise<string | null> {
+  ): Promise<{ text: string; p: number } | null> {
     let json: ChatResponse;
     try {
-      const body = buildRequestBody(this.model, ctx, prefill, { maxTokens: FOLLOWUP_MAX_TOKENS, temperature: 0 });
-      json = await this.post(body, ctx.signal, usage);
+      json = await this.post(buildRequestBody(this.model, this.entry.route, ctx, prefill, FOLLOWUP_MAX_TOKENS), ctx.signal, usage);
     } catch (err) {
       if (ctx.signal.aborted) throw err;
-      return null; // best effort: the partial candidate is simply dropped
+      return null;
     }
     const choice = json.choices?.[0];
-    const entries = choice?.logprobs?.content ?? [];
-    let text: string | null = null;
-    if (entries.length > 0 && entries.every((e) => Array.isArray(e.bytes))) {
-      if (!sameToken(entries[0], partial)) return null;
-      const bytes: number[] = [];
-      for (const e of entries) {
-        bytes.push(...(e.bytes as number[]));
-        try {
-          text = utf8.decode(new Uint8Array(bytes));
-          break;
-        } catch {
-          /* incomplete: add the next token */
-        }
-      }
-    } else if (choice?.message?.content) {
-      // No bytes: take the content up to and including its first non-ASCII character.
-      const chars = Array.from(choice.message.content);
-      const i = chars.findIndex((ch) => (ch.codePointAt(0) ?? 0) > 0x7f);
-      if (i >= 0) text = chars.slice(0, i + 1).join("");
+    const content = choice?.message?.content;
+    if (!content) return null;
+    // content may be left-trimmed; recover a leading space from the first token string.
+    const lead = /^\s+/.exec(choice?.logprobs?.content?.[0]?.token ?? "")?.[0] ?? "";
+    const unit = firstUnit(content.trimStart());
+    if (unit === null) return null;
+    let text = lead + unit;
+    if (held) {
+      if (!text.startsWith(held) || text === held) return null;
+      text = text.slice(held.length);
     }
-    if (text === null || text.includes("�")) return null;
-    return stripTail(text, tail);
+    const lp = choice?.logprobs?.content?.[0]?.logprob;
+    return { text, p: typeof lp === "number" && Number.isFinite(lp) ? Math.exp(lp) : 1 };
   }
 
-  /** POST with timeout, abort and one retry. Adds usage of the successful attempt. */
+  /** POST with timeout, abort and one retry. Adds usage of successful attempts. */
   private async post(body: Record<string, unknown>, signal: AbortSignal, usage: Usage): Promise<ChatResponse> {
     const key = process.env.OPENROUTER_API_KEY;
     if (!key) throw new Error(`${this.model}: OPENROUTER_API_KEY is not set`);
@@ -411,7 +488,6 @@ class Client {
    */
   private async attempt(key: string, body: Record<string, unknown>, signal: AbortSignal, usage: Usage): Promise<Attempt> {
     if (signal.aborted) throw abortError(this.model, signal);
-    const started = Date.now();
     const ctl = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -476,7 +552,6 @@ class Client {
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
-      usage.latencyMs += Date.now() - started;
     }
   }
 
@@ -488,8 +563,8 @@ class Client {
     usage.outputTokens += outTok;
     if (typeof u.cost === "number" && Number.isFinite(u.cost)) {
       usage.costUsd += u.cost;
-    } else if (this.info.pricing) {
-      usage.costUsd += (inTok * this.info.pricing.inputPerM + outTok * this.info.pricing.outputPerM) / 1e6;
+    } else if (this.entry.pricing) {
+      usage.costUsd += (inTok * this.entry.pricing.inputPerM + outTok * this.entry.pricing.outputPerM) / 1e6;
     }
   }
 }

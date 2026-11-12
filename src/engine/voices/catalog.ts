@@ -1,154 +1,128 @@
 /**
- * The default live choir and model metadata for OpenRouter voices.
+ * The live choir: which OpenRouter models sing, and exactly how each one is
+ * routed so that it CONTINUES the partial answer (see openrouter.ts header).
  *
- * Source: the public model list https://openrouter.ai/api/v1/models and the
- * per-model provider lists https://openrouter.ai/api/v1/models/{slug}/endpoints,
- * checked on CATALOG_CHECKED below.
+ * Measured live on 2026-11-12 with scripts/live-smoke.mjs and probes over
+ * every logprobs-capable endpoint on OpenRouter (456 model x provider pairs):
  *
- * Selection rules
- *  - open-weight chat models whose `supported_parameters` list both
- *    `logprobs` and `top_logprobs`;
- *  - NOT reasoning models (no `reasoning` / `include_reasoning` parameter):
- *    a reasoning model would spend the single output token on hidden thinking;
- *  - different labs, different countries where the list allows it;
- *  - cheap and fast (one request per voice per output token).
+ *  - On almost every provider an assistant prefill is CLOSED and a fresh
+ *    reply starts ("one two three four" -> "one"/"It"/"five", never " five").
+ *    That includes Llama 3.3 70B (AkashML, Parasail, CoreWeave, SambaNova),
+ *    Gemma 3/4 (Parasail, NextBit, Vertex, ...), Qwen3 on Parasail/DekaLLM,
+ *    Mistral Nemo/Small, GPT-4o, Kimi on Novita/Inceptron, GLM, MiniMax.
+ *    The /api/v1/completions endpoint wraps `prompt` in the chat template on
+ *    every provider tested, so it is no way out. vLLM pass-through flags
+ *    (continue_final_message / add_generation_prompt) are not forwarded.
+ *  - Only these continue verifiably (count " five", mid-word "is" via token
+ *    healing, EOS after a finished answer, Arabic):
+ *      DeepSeek V4 (native template) on StreamLake and Novita
+ *      Kimi K2.6 on Moonshot AI's own API with `partial: true`
+ *      Qwen3.x on Alibaba's own API with `partial: true` (top_logprobs <= 5)
+ *    Mistral's own API honours `prefix: true` but returns no logprobs.
+ *  - So every verified voice comes from a Chinese lab. No US or European
+ *    open-weight model on OpenRouter passed (checked 2026-11-12).
  *
- * Important caveat found while checking: the model-level `supported_parameters`
- * is a union over providers. Only some providers of each model honour
- * logprobs (see the per-endpoint lists noted on each entry). The adapter sends
- * `provider.require_parameters: true` so OpenRouter only routes to those.
- *
- * Pricing is the model-list figure (USD per million tokens). The provider that
- * actually serves a logprobs request can differ, so the adapter prefers the
- * `usage.cost` that OpenRouter returns and falls back to these figures.
+ * Pricing is the pinned provider's endpoint price (USD per million tokens),
+ * used only when a response carries no usage.cost.
  */
 import type { VoiceInfo } from "@/lib/protocol";
 
-/** Date the model list and endpoint lists were checked. */
+/** Date the routes below were verified live. */
 export const CATALOG_CHECKED = "2026-11-12";
 
-export type LiveVoiceInfo = VoiceInfo & { simulated: false };
+export interface VoiceRoute {
+  /** Provider endpoint tags tried in this order, no fallback to others. Empty = OpenRouter picks (unverified). */
+  providers: string[];
+  /** Mark the prefill message `partial: true` (Moonshot / Alibaba partial mode). */
+  partial?: boolean;
+  /** Send reasoning: { enabled: false } so the single token is not spent thinking. */
+  reasoningOff?: boolean;
+  /** top_logprobs to request (Alibaba caps it at 5). Default 20. */
+  topLogprobs?: number;
+}
 
-/** The default choir (5 voices, 5 labs, 3 countries). */
-export const DEFAULT_CHOIR: LiveVoiceInfo[] = [
+export type LiveVoiceInfo = VoiceInfo & { simulated: false };
+export type CatalogEntry = LiveVoiceInfo & { route: VoiceRoute; verified?: string };
+
+/** Default choir: the voices that passed every live check on CATALOG_CHECKED. */
+export const DEFAULT_CHOIR: CatalogEntry[] = [
   {
-    // logprobs-capable providers on CATALOG_CHECKED: AkashML, Parasail,
-    // Cloudflare, SambaNova, CoreWeave ($0.20-0.71 in / $0.50-2.25 out).
-    id: "meta-llama/llama-3.3-70b-instruct",
-    label: "Llama 3.3 70B",
-    lab: "Meta",
-    origin: "US",
-    blurb: "Plain-spoken American generalist; steady, conventional phrasing.",
-    simulated: false,
-    pricing: { inputPerM: 0.71, outputPerM: 0.71 },
-  },
-  {
-    // logprobs-capable providers: Io Net, DekaLLM, Parasail.
-    id: "mistralai/mistral-nemo",
-    label: "Mistral Nemo 12B",
-    lab: "Mistral AI",
-    origin: "France",
-    blurb: "Small, quick European model (built with NVIDIA); terse and direct.",
-    simulated: false,
-    pricing: { inputPerM: 0.029, outputPerM: 0.03 },
-  },
-  {
-    // logprobs-capable providers: NextBit, Parasail.
-    id: "google/gemma-3-27b-it",
-    label: "Gemma 3 27B",
-    lab: "Google",
-    origin: "US",
-    blurb: "Google's open model; polished, list-friendly, a little formal.",
-    simulated: false,
-    pricing: { inputPerM: 0.08, outputPerM: 0.35 },
-  },
-  {
-    // logprobs-capable providers: Parasail only (single point of failure).
-    id: "qwen/qwen3-235b-a22b-2507",
-    label: "Qwen3 235B (2507)",
-    lab: "Alibaba (Qwen)",
-    origin: "China",
-    blurb: "Large non-thinking Qwen MoE; broad multilingual vocabulary.",
-    simulated: false,
-    pricing: { inputPerM: 0.14, outputPerM: 0.8 },
-  },
-  {
-    // logprobs-capable providers: GMICloud only (single point of failure).
-    id: "deepseek/deepseek-chat-v3-0324",
-    label: "DeepSeek V3 (0324)",
+    id: "deepseek/deepseek-v4-pro-0813",
+    label: "DeepSeek V4 Pro",
     lab: "DeepSeek",
     origin: "China",
-    blurb: "DeepSeek's non-reasoning chat model; confident, dense prose.",
+    blurb: "Large DeepSeek MoE; dense, confident, slightly formal prose.",
     simulated: false,
-    pricing: { inputPerM: 0.29, outputPerM: 1.14 },
+    pricing: { inputPerM: 0.66, outputPerM: 1.98 },
+    // Novita only. Measured 2026-11-12, 50 identical mid-sentence requests each:
+    // StreamLake ignored the prefill and restarted the answer on 4 of 50 (and
+    // dropped logprobs on 2 more); Novita continued correctly on 50 of 50.
+    route: { providers: ["novita/fp8"], reasoningOff: true },
+    verified: CATALOG_CHECKED,
+  },
+  {
+    id: "moonshotai/kimi-k2.6",
+    label: "Kimi K2.6",
+    lab: "Moonshot AI",
+    origin: "China",
+    blurb: "Moonshot's open MoE; lively, direct, fond of structure.",
+    simulated: false,
+    pricing: { inputPerM: 0.95, outputPerM: 4.0 },
+    route: { providers: ["moonshotai"], partial: true, reasoningOff: true },
+    verified: CATALOG_CHECKED,
+  },
+  {
+    id: "qwen/qwen3.6-27b",
+    label: "Qwen3.6 27B",
+    lab: "Alibaba (Qwen)",
+    origin: "China",
+    blurb: "Mid-size dense Qwen; broad multilingual vocabulary, plain phrasing.",
+    simulated: false,
+    pricing: { inputPerM: 0.45, outputPerM: 2.7 },
+    route: { providers: ["alibaba"], partial: true, reasoningOff: true, topLogprobs: 5 },
+    verified: CATALOG_CHECKED,
   },
 ];
 
-/**
- * Extra models with known metadata, usable through CHORUS_MODELS. All list
- * logprobs + top_logprobs and are not reasoning models (CATALOG_CHECKED).
- */
-export const KNOWN_MODELS: LiveVoiceInfo[] = [
+/** Further models with known routes, usable through CHORUS_MODELS. */
+export const KNOWN_MODELS: CatalogEntry[] = [
   ...DEFAULT_CHOIR,
   {
-    // logprobs-capable provider: CoreWeave only ($0.22 / $0.22).
-    id: "meta-llama/llama-3.1-8b-instruct",
-    label: "Llama 3.1 8B",
-    lab: "Meta",
-    origin: "US",
-    blurb: "Tiny, fast Llama; simple and predictable.",
-    simulated: false,
-    pricing: { inputPerM: 0.02, outputPerM: 0.04 },
-  },
-  {
-    // logprobs-capable provider: Parasail only.
-    id: "mistralai/mistral-small-3.2-24b-instruct",
-    label: "Mistral Small 3.2 24B",
-    lab: "Mistral AI",
-    origin: "France",
-    blurb: "Mid-size Mistral; crisp instruction following.",
-    simulated: false,
-    pricing: { inputPerM: 0.1, outputPerM: 0.3 },
-  },
-  {
-    // logprobs-capable provider: DekaLLM only.
-    id: "qwen/qwen3-30b-a3b-instruct-2507",
-    label: "Qwen3 30B A3B (2507)",
+    // Passed every check on CATALOG_CHECKED (same lab as qwen3.6-27b).
+    id: "qwen/qwen3.5-397b-a17b",
+    label: "Qwen3.5 397B",
     lab: "Alibaba (Qwen)",
     origin: "China",
-    blurb: "Small, fast non-thinking Qwen MoE.",
+    blurb: "Qwen's largest open MoE; careful and thorough.",
     simulated: false,
-    pricing: { inputPerM: 0.1, outputPerM: 0.3 },
+    pricing: { inputPerM: 0.39, outputPerM: 2.34 },
+    route: { providers: ["alibaba"], partial: true, reasoningOff: true, topLogprobs: 5 },
+    verified: CATALOG_CHECKED,
   },
   {
-    // logprobs-capable provider: Parasail only.
-    id: "qwen/qwen3-next-80b-a3b-instruct",
-    label: "Qwen3 Next 80B A3B",
+    // Passed every check on CATALOG_CHECKED; Novita drops logprobs now and
+    // then (the adapter retries once, then falls back to the other healing request).
+    id: "deepseek/deepseek-v4-flash-0731",
+    label: "DeepSeek V4 Flash",
+    lab: "DeepSeek",
+    origin: "China",
+    blurb: "Small, fast DeepSeek; terse.",
+    simulated: false,
+    pricing: { inputPerM: 0.308, outputPerM: 0.924 },
+    route: { providers: ["novita/fp8"], reasoningOff: true },
+    verified: CATALOG_CHECKED,
+  },
+  {
+    // Passed every check on CATALOG_CHECKED.
+    id: "qwen/qwen3.8-flash",
+    label: "Qwen3.8 Flash",
     lab: "Alibaba (Qwen)",
     origin: "China",
-    blurb: "Sparse hybrid-attention Qwen; fast, non-thinking.",
+    blurb: "Cheap, fast Qwen.",
     simulated: false,
-    pricing: { inputPerM: 0.09, outputPerM: 1.1 },
-  },
-  {
-    // logprobs-capable provider: Parasail only.
-    id: "google/gemma-3-4b-it",
-    label: "Gemma 3 4B",
-    lab: "Google",
-    origin: "US",
-    blurb: "Very small Gemma; cheap, sometimes naive.",
-    simulated: false,
-    pricing: { inputPerM: 0.05, outputPerM: 0.1 },
-  },
-  {
-    // logprobs-capable provider: Novita only.
-    id: "moonshotai/kimi-k2-0905",
-    label: "Kimi K2 (0905)",
-    lab: "Moonshot AI",
-    origin: "China",
-    blurb: "Large MoE from Moonshot; lively, opinionated style.",
-    simulated: false,
-    pricing: { inputPerM: 0.6, outputPerM: 2.5 },
+    pricing: { inputPerM: 0.15, outputPerM: 0.47 },
+    route: { providers: ["alibaba"], partial: true, reasoningOff: true, topLogprobs: 5 },
+    verified: CATALOG_CHECKED,
   },
 ];
 
@@ -163,28 +137,54 @@ export function labelFromSlug(slug: string): string {
     .join(" ");
 }
 
-/** Metadata for one slug; unknown slugs get a derived label, lab "Unknown", no pricing. */
-export function describeModel(slug: string): LiveVoiceInfo {
+/**
+ * Metadata + route for one CHORUS_MODELS item: "slug" or "slug@providerTag".
+ * Unknown slugs get a derived label, lab "Unknown", no pricing, and an
+ * unverified route (OpenRouter's choice, or the given provider tag).
+ */
+export function describeModel(item: string): CatalogEntry {
+  const [slug, tag] = item.split("@").map((s) => s.trim());
   const known = KNOWN_MODELS.find((m) => m.id === slug);
-  if (known) return { ...known };
+  if (known) {
+    const entry: CatalogEntry = { ...known, route: { ...known.route, providers: [...known.route.providers] } };
+    if (tag) entry.route.providers = [tag];
+    return entry;
+  }
   return {
     id: slug,
     label: labelFromSlug(slug),
     lab: "Unknown",
     origin: "Unknown",
     simulated: false,
+    route: { providers: tag ? [tag] : [] },
   };
 }
 
 /**
- * The choir to build: CHORUS_MODELS (comma-separated OpenRouter slugs) when
- * set and non-empty, otherwise DEFAULT_CHOIR. Duplicates are dropped.
+ * The choir to build: CHORUS_MODELS (comma-separated "slug" or "slug@providerTag")
+ * when set and non-empty, otherwise DEFAULT_CHOIR. Duplicates are dropped.
  */
-export function resolveChoir(env: string | undefined = process.env.CHORUS_MODELS): LiveVoiceInfo[] {
-  const slugs = (env ?? "")
+export function resolveChoir(env: string | undefined = process.env.CHORUS_MODELS): CatalogEntry[] {
+  const items = (env ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  if (slugs.length === 0) return DEFAULT_CHOIR.map((m) => ({ ...m }));
-  return [...new Set(slugs)].map(describeModel);
+  if (items.length === 0) return DEFAULT_CHOIR.map((m) => describeModel(m.id));
+  const seen = new Set<string>();
+  const out: CatalogEntry[] = [];
+  for (const item of items) {
+    const entry = describeModel(item);
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    out.push(entry);
+  }
+  return out;
+}
+
+/** The public VoiceInfo of an entry (route and verification stay server side). */
+export function toVoiceInfo(entry: CatalogEntry): LiveVoiceInfo {
+  const { route: _route, verified: _verified, ...info } = entry;
+  void _route;
+  void _verified;
+  return info;
 }

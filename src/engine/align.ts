@@ -5,18 +5,27 @@
  * " decentral", a third " decentralised". To mix them we need every voice's
  * probability for the same set of candidate strings.
  *
- * Scheme (a HEURISTIC, not an exact marginalisation; exact alignment would need
- * each voice's probability of every multi-token continuation, which top-k
- * logprob APIs do not give us):
+ * Scheme: EXACT STRING MATCH ONLY.
  *   - the candidate set is the union of the token strings the voices proposed
- *   - for voice m and candidate c, P_m(c) sums over m's listed tokens t:
- *       t === c                   -> p(t)
- *       t strictly starts with c  -> p(t) * len(c)/len(t)   (c is a coarser cut of t)
- *       c strictly starts with t  -> p(t) * len(t)/len(c)   (c extends t)
- *       EOS only ever matches EOS
- *     The length-ratio damping stops tiny candidates such as " " from hoovering
- *     up the mass of every token that happens to begin with a space.
+ *   - for voice m and candidate c, P_m(c) is the probability m gave that exact
+ *     string (0 if it did not list it); EOS only ever matches EOS
  *   - P_m is then renormalised over the candidate set.
+ *
+ * Why no partial credit between cuts of different length. Two earlier versions
+ * shared mass between a token and its prefixes/extensions, scaled by length
+ * ratio. Both were measured against live models on 2026-11-12 and both
+ * corrupted text:
+ *   - crediting a SHORTER candidate from longer tokens let a fragment such as
+ *     "'" collect the mass of every voice that wanted "'t"; it was sampled and
+ *     the word was left broken ("shouldn' be").
+ *   - crediting a LONGER candidate from shorter tokens gave one voice's
+ *     low-probability " cans" 4/5 of every other voice's " can", so wrong
+ *     inflections won ("cans undermine trusts").
+ *   A voice's top-k list simply does not say how likely "s" is after " can",
+ *   so any ratio is invented mass. With exact matching, voices that cut the
+ *   same word differently split their vote across the cuts; whichever cut
+ *   wins, the next step continues the word, so the text is unaffected and the
+ *   only cost is that such a step reads as less agreed than it really was.
  *
  * Failure cases guarded here:
  *   - empty-string tokens would be a prefix of everything (and length 0 makes
@@ -29,19 +38,14 @@
  *     never matches EOS, because EOS is handled before any prefix test.
  *   - a voice whose listed tokens relate to no candidate at all gets an
  *     all-zero vector rather than a 0/0 NaN.
- * Lengths are measured in code points so astral characters count once.
- * Whitespace-only candidates are kept (a newline is a legitimate piece), but
- * the damping keeps their borrowed mass small.
+ * Whitespace-only candidates are kept (a newline is a legitimate piece).
  */
-import { EOS } from "@/lib/protocol";
 import type { VoiceDistribution } from "@/engine/voice";
 
 export interface RawCandidate {
   token: string;
   p: number;
 }
-
-const cpLen = (s: string) => Array.from(s).length;
 
 /** Convert a voice's logprob list to clean probabilities, best first. */
 export function toProbs(top: VoiceDistribution["top"]): RawCandidate[] {
@@ -75,13 +79,9 @@ export function buildCandidates(lists: RawCandidate[][], extra: string[] = []): 
   return out;
 }
 
-/** How much of voice token t's mass counts toward candidate c. */
+/** How much of voice token t's mass counts toward candidate c: all of it on an exact match, else none. */
 export function overlap(t: string, c: string): number {
-  if (t === c) return 1;
-  if (t === EOS || c === EOS) return 0;
-  if (t.startsWith(c)) return cpLen(c) / cpLen(t);
-  if (c.startsWith(t)) return cpLen(t) / cpLen(c);
-  return 0;
+  return t === c ? 1 : 0;
 }
 
 /**

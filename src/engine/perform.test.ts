@@ -107,7 +107,7 @@ describe("validateRequest", () => {
 });
 
 describe("computeStep", () => {
-  it("aligns different cuts and reports a coherent step", () => {
+  it("keeps different cuts as separate candidates and reports a coherent step", () => {
     const out = computeStep({
       index: 0,
       blend: "mixture",
@@ -122,8 +122,10 @@ describe("computeStep", () => {
     assertStepInvariants({ ...out.step, elapsedMs: 0 });
     // the muted voice's token is not a candidate at all
     expect(out.step.alternatives.some((a) => a.token === " dec")).toBe(false);
-    expect(out.step.ballots[2].pChosen).toBeGreaterThan(0); // but it is still aligned for display
+    // exact matching: a different cut of the same word lends no mass to the chosen one
+    expect(out.step.ballots[2].pChosen).toBe(0);
     expect(out.step.ballots[2].rank).toBeNull();
+    expect(out.step.alternatives.map((a) => a.token).sort()).toEqual([" decentral", " decentralised"]);
   });
 
   it("forced token missing from every list gets p 0 and weight-based shares, no NaN", () => {
