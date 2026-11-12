@@ -43,7 +43,12 @@ export interface Take {
 export interface ChannelState {
   gain: number;
   muted: boolean;
+  /** In the choir for the next performance. Voices that are off are not called at all. */
+  on: boolean;
 }
+
+/** A choir of one has nothing to blend. */
+export const MIN_VOICES = 2;
 
 export interface Replay {
   takeId: string;
@@ -86,6 +91,8 @@ interface Actions {
   setSettings: (p: Partial<PerformSettings>) => void;
   setChannel: (id: string, p: Partial<ChannelState>) => void;
   toggleSolo: (id: string) => void;
+  /** Put a voice in or out of the choir; never drops below MIN_VOICES. */
+  toggleVoice: (id: string) => void;
   addTake: (t: Take, reset: boolean) => void;
   updateTake: (id: string, fn: (t: Take) => Take) => void;
   pushStep: (id: string, s: Step) => void;
@@ -123,13 +130,21 @@ export const useChorus = create<State & Actions>()((set, get) => ({
       mockReason: reason,
       boot: "ready",
       settings: { ...c.defaults },
-      channels: Object.fromEntries(c.voices.map((v) => [v.id, { gain: 1, muted: false }])),
+      channels: Object.fromEntries(
+        c.voices.map((v) => [v.id, { gain: 1, muted: false, on: !c.defaultVoices || c.defaultVoices.includes(v.id) }]),
+      ),
       solo: null,
     }),
   setSettings: (p) => set({ settings: { ...get().settings, ...p } }),
   setChannel: (id, p) => {
-    const cur = get().channels[id] ?? { gain: 1, muted: false };
+    const cur = get().channels[id] ?? { gain: 1, muted: false, on: true };
     set({ channels: { ...get().channels, [id]: { ...cur, ...p } } });
+  },
+  toggleVoice: (id) => {
+    const s = get();
+    const cur = s.channels[id] ?? { gain: 1, muted: false, on: true };
+    if (cur.on && selectedVoices(s).length <= MIN_VOICES) return;
+    set({ channels: { ...s.channels, [id]: { ...cur, on: !cur.on } }, solo: s.solo === id ? null : s.solo });
   },
   toggleSolo: (id) => set({ solo: get().solo === id ? null : id }),
   addTake: (t, reset) =>
@@ -166,11 +181,16 @@ export function visibleCount(take: Take | undefined, replay: Replay | null): num
   return take.steps.length;
 }
 
+/** The voices in the choir for the next performance, in choir order. Their position here is their colour. */
+export function selectedVoices(s: Pick<State, "choir" | "channels">): VoiceInfo[] {
+  return (s.choir?.voices ?? []).filter((v) => s.channels[v.id]?.on ?? true);
+}
+
 /** The weights the next performance will use. */
 export function buildVoiceWeights(s: Pick<State, "choir" | "channels" | "solo">): { id: string; weight: number }[] {
-  const voices = s.choir?.voices ?? [];
+  const voices = selectedVoices(s);
   return voices.map((v) => {
-    const ch = s.channels[v.id] ?? { gain: 1, muted: false };
+    const ch = s.channels[v.id] ?? { gain: 1, muted: false, on: true };
     let w = ch.muted ? 0 : ch.gain;
     if (s.solo) w = v.id === s.solo ? Math.max(ch.gain, 0.05) : 0;
     return { id: v.id, weight: Math.round(Math.max(0, w) * 100) / 100 };

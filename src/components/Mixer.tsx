@@ -1,10 +1,10 @@
 "use client";
 
-import { Dices } from "lucide-react";
+import { Check, Dices } from "lucide-react";
 import { useId, type CSSProperties } from "react";
 import { num } from "@/lib/client/format";
 import { voiceColorVar } from "@/lib/client/palette";
-import { buildVoiceWeights, useChorus } from "@/lib/client/store";
+import { buildVoiceWeights, MIN_VOICES, selectedVoices, useChorus } from "@/lib/client/store";
 import { VoiceMark } from "./VoiceMark";
 
 /** The mixing desk: per-voice gain / mute / solo, plus the global blend settings. */
@@ -13,7 +13,9 @@ export function Mixer() {
   const channels = useChorus((s) => s.channels);
   const solo = useChorus((s) => s.solo);
   const settings = useChorus((s) => s.settings);
-  const { setChannel, toggleSolo, setSettings } = useChorus.getState();
+  const { setChannel, toggleSolo, toggleVoice, setSettings } = useChorus.getState();
+  const selected = selectedVoices({ choir, channels });
+  const recorded = choir?.mode === "demo" && !useChorus.getState().mock;
   const weights = buildVoiceWeights({ choir, channels, solo });
   const singing = weights.filter((w) => w.weight > 0).length;
   const ids = { temp: useId(), seed: useId(), max: useId() };
@@ -24,12 +26,50 @@ export function Mixer() {
     <div className="flex flex-col gap-6 p-4 sm:p-5">
       <div>
         <p className="eyebrow">Mixer</p>
-        <p className="mt-1 text-xs text-ink-3">Changes apply to the next performance and to forks.</p>
+        <p className="mt-1 text-xs text-ink-3">
+          {recorded
+            ? "The demo replays recordings, so these controls have no effect here. With a live choir they shape the next performance and every fork."
+            : "Changes apply to the next performance and to forks."}
+        </p>
       </div>
 
+      {choir.mode === "live" && choir.voices.length > MIN_VOICES && (
+        <fieldset>
+          <legend className="mb-2 text-[11px] font-medium text-ink-3">
+            Choir · {selected.length} of {choir.voices.length} models
+          </legend>
+          <div className="flex flex-wrap gap-1.5">
+            {choir.voices.map((v) => {
+              const on = channels[v.id]?.on ?? true;
+              const locked = on && selected.length <= MIN_VOICES;
+              return (
+                <button
+                  key={v.id}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={on}
+                  disabled={locked}
+                  title={locked ? "A choir needs at least two voices" : `${v.lab} · ${v.origin}`}
+                  onClick={() => toggleVoice(v.id)}
+                  className={`flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors disabled:cursor-not-allowed ${on ? "border-accent/60 bg-accent/10 text-ink" : "border-line text-ink-3 hover:border-line-strong hover:text-ink-2"}`}
+                >
+                  <span className={`grid size-3.5 place-items-center rounded-sm border ${on ? "border-accent bg-accent text-accent-ink" : "border-line-strong"}`} aria-hidden="true">
+                    {on && <Check size={11} strokeWidth={3} />}
+                  </span>
+                  {v.label}
+                </button>
+              );
+            })}
+          </div>
+          <p className="mt-2 text-xs leading-snug text-ink-3">
+            Pick two or more. Every model here was verified to continue a partial answer and report its odds. Each one adds a call per token, so more voices cost more and the slowest one sets the pace.
+          </p>
+        </fieldset>
+      )}
+
       <section aria-label="Voices" className="flex flex-col overflow-hidden rounded-lg border border-line">
-        {choir.voices.map((v, i) => {
-          const ch = channels[v.id] ?? { gain: 1, muted: false };
+        {selected.map((v, i) => {
+          const ch = channels[v.id] ?? { gain: 1, muted: false, on: true };
           const w = weights[i]?.weight ?? 0;
           const silencedBySolo = solo != null && solo !== v.id;
           return (

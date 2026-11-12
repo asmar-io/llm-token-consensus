@@ -84,7 +84,7 @@ export const DEFAULT_CHOIR: CatalogEntry[] = [
   },
 ];
 
-/** Further models with known routes, usable through CHORUS_MODELS. */
+/** Every model with a verified route. All of them are offered in the UI; DEFAULT_CHOIR is the starting selection. */
 export const KNOWN_MODELS: CatalogEntry[] = [
   ...DEFAULT_CHOIR,
   {
@@ -161,15 +161,15 @@ export function describeModel(item: string): CatalogEntry {
 }
 
 /**
- * The choir to build: CHORUS_MODELS (comma-separated "slug" or "slug@providerTag")
- * when set and non-empty, otherwise DEFAULT_CHOIR. Duplicates are dropped.
+ * The voices on offer: CHORUS_MODELS (comma-separated "slug" or "slug@providerTag")
+ * when set and non-empty, otherwise every verified model. Duplicates are dropped.
  */
 export function resolveChoir(env: string | undefined = process.env.CHORUS_MODELS): CatalogEntry[] {
   const items = (env ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  if (items.length === 0) return DEFAULT_CHOIR.map((m) => describeModel(m.id));
+  if (items.length === 0) return KNOWN_MODELS.map((m) => describeModel(m.id));
   const seen = new Set<string>();
   const out: CatalogEntry[] = [];
   for (const item of items) {
@@ -179,6 +179,16 @@ export function resolveChoir(env: string | undefined = process.env.CHORUS_MODELS
     out.push(entry);
   }
   return out;
+}
+
+/**
+ * Which of the offered voices start selected: the default choir when it is
+ * on offer, otherwise (CHORUS_MODELS chose something else) all of them.
+ */
+export function defaultVoiceIds(offered: { id: string }[]): string[] {
+  const ids = new Set(offered.map((v) => v.id));
+  const picked = DEFAULT_CHOIR.map((m) => m.id).filter((id) => ids.has(id));
+  return picked.length >= 2 ? picked : offered.map((v) => v.id);
 }
 
 /** The public VoiceInfo of an entry (route and verification stay server side). */

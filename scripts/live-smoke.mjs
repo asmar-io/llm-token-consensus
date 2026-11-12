@@ -49,7 +49,8 @@ function parseSpec(s) {
 function defaultVoices() {
   const here = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(join(here, "..", "src", "engine", "voices", "catalog.ts"), "utf8");
-  const block = src.slice(src.indexOf("export const DEFAULT_CHOIR"), src.indexOf("export const KNOWN_MODELS"));
+  // Every verified model: DEFAULT_CHOIR plus the further entries of KNOWN_MODELS.
+  const block = src.slice(src.indexOf("export const DEFAULT_CHOIR"), src.indexOf("export function labelFromSlug"));
   const out = [];
   for (const entry of block.split(/\n  \{/).slice(1)) {
     const id = entry.match(/\bid:\s*"([^"]+)"/)?.[1];

@@ -1,2 +1,2 @@
-export { createDemoVoices, createDemoVoice, demoDistribution, PERSONAS, DEMO_VOICE_INFOS, DEMO_SAMPLE_PROMPTS } from "./choir";
-export { SCRIPTS, FALLBACK_SCRIPT, scriptForPrompt } from "./scripts";
+export { RECORDINGS, DEMO_SAMPLE_PROMPTS, DEMO_VOICE_INFOS, DEMO_RECORDED_ON, matchRecording, replay } from "./recorded";
+export type { Recording, ReplayOptions } from "./recorded";

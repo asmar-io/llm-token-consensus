@@ -5,7 +5,7 @@ import { playNote } from "./audio";
 import { heatOf, showToken } from "./format";
 import { makeLookup } from "./palette";
 import { perform } from "./sse";
-import { buildVoiceWeights, getActiveTake, singingCount, useChorus, type Take } from "./store";
+import { buildVoiceWeights, getActiveTake, selectedVoices, singingCount, useChorus, type Take } from "./store";
 import { computeSummary } from "./summary";
 
 let current: { takeId: string; ctrl: AbortController } | null = null;
@@ -43,6 +43,7 @@ export function fork(fromId: string, index: number, token: string) {
   const s = useChorus.getState();
   const from = s.takes.find((t) => t.id === fromId);
   if (!from || !s.choir) return;
+  if (!canFork(from)) return;
   if (singingCount(s) === 0) return;
   const prefixSteps = from.steps.slice(0, index);
 
@@ -76,6 +77,11 @@ export function fork(fromId: string, index: number, token: string) {
   useChorus.setState({ selected: index, panel: "inspector" });
 }
 
+/** A recorded demo take cannot fork: that needs live model calls. (The in-browser mock can.) */
+export function canFork(t: Pick<Take, "mode" | "mock">): boolean {
+  return t.mode === "live" || t.mock;
+}
+
 /** Run the same request again (after an error). */
 export function retry(takeId: string) {
   const s = useChorus.getState();
@@ -100,7 +106,7 @@ function baseTake(prompt: string, parent?: Take): Take {
     n,
     prompt,
     request: null,
-    voices: parent?.voices ?? s.choir?.voices ?? [],
+    voices: parent?.voices ?? selectedVoices(s),
     steps: [],
     status: "connecting",
     notices: [],

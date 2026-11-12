@@ -7,7 +7,7 @@
  *
  * Vocabulary
  *   voice        one LLM taking part in the performance
- *   choir        the set of voices available (demo = simulated, live = OpenRouter)
+ *   choir        the set of voices available (live = OpenRouter calls, demo = recorded live performances)
  *   step         one emitted text piece ("token") plus everything known about how it was chosen
  *   ballot       one voice's view of one step
  *   performance  one full generation run (a stream of steps)
@@ -24,7 +24,7 @@ export type BlendMode =
   | "consensus";
 
 export interface VoiceInfo {
-  /** Stable id. Live: the OpenRouter model slug. Demo: "demo:<name>". */
+  /** Stable id: the OpenRouter model slug. */
   id: string;
   /** Short display name, e.g. "Llama 3.3 70B". */
   label: string;
@@ -35,7 +35,7 @@ export interface VoiceInfo {
   /** One line on what this voice tends to sound like. Shown in the UI. */
   blurb?: string;
   simulated: boolean;
-  /** USD per million tokens. Absent for simulated voices. */
+  /** USD per million tokens, when known. */
   pricing?: { inputPerM: number; outputPerM: number };
 }
 
@@ -50,10 +50,14 @@ export interface PerformSettings {
 
 /** GET /api/choir */
 export interface ChoirInfo {
+  /** "live": real model calls. "demo": recorded live performances are replayed (no key needed, no forks). */
   mode: "demo" | "live";
+  /** Every voice that can be put in the choir. */
   voices: VoiceInfo[];
+  /** Ids of the voices selected to begin with. Absent = all of them. */
+  defaultVoices?: string[];
   defaults: PerformSettings;
-  /** Prompts the UI offers as one-click starters. In demo mode these are the scripted ones. */
+  /** Prompts the UI offers as one-click starters. In demo mode these are the recorded ones. */
   samplePrompts: string[];
   /** Human-readable note, e.g. why the choir is in demo mode. */
   note?: string;

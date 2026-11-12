@@ -444,9 +444,10 @@ describe("choir", () => {
     expect(createLiveVoices()).toEqual([]);
   });
 
-  it("builds the default choir with public VoiceInfo only (routes stay server side)", () => {
+  it("offers every verified model with public VoiceInfo only (routes stay server side)", () => {
     const voices = createLiveVoices();
-    expect(voices.map((v) => v.info.id)).toEqual(DEFAULT_CHOIR.map((m) => m.id));
+    expect(voices.map((v) => v.info.id)).toEqual(KNOWN_MODELS.map((m) => m.id));
+    expect(KNOWN_MODELS.every((m) => m.verified && m.route.providers.length > 0)).toBe(true);
     for (const v of voices) {
       expect(v.info.simulated).toBe(false);
       expect(v.info.pricing).toBeDefined();
@@ -471,7 +472,7 @@ describe("choir", () => {
 
   it("derives labels from slugs", () => {
     expect(labelFromSlug("meta-llama/llama-3.3-70b-instruct")).toBe("Llama 3.3 70b Instruct");
-    expect(resolveChoir("")).toHaveLength(DEFAULT_CHOIR.length);
+    expect(resolveChoir("")).toHaveLength(KNOWN_MODELS.length);
   });
 });
 

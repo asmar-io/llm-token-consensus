@@ -2,7 +2,7 @@
 
 import { ChevronLeft, ChevronRight, GitBranch, X } from "lucide-react";
 import type { Step, VoiceBallot, VoiceInfo } from "@/lib/protocol";
-import { fork } from "@/lib/client/conductor";
+import { canFork, fork } from "@/lib/client/conductor";
 import { agreementWord, bits, clamp01, entropyWord, heatOf, isEOS, ms, num, pct, showToken, usd } from "@/lib/client/format";
 import { useLookup } from "@/lib/client/hooks";
 import { voiceColorVar, type VoiceLookup } from "@/lib/client/palette";
@@ -210,7 +210,11 @@ function Alternatives({ take, step }: { take: Take; step: Step }) {
       <h3 id="alts-h" className="eyebrow mb-1">
         What else it could have been
       </h3>
-      <p className="mb-3 text-xs text-ink-3">The blended odds for this position. Fork any alternative to hear where the choir goes from there.</p>
+      <p className="mb-3 text-xs text-ink-3">
+        {canFork(take)
+          ? "The blended odds for this position. Fork any alternative to hear where the choir goes from there."
+          : "The blended odds for this position. This is a recording, so it cannot fork: with a live choir you can pick any alternative and hear where it leads."}
+      </p>
       <ol className="flex flex-col">
         {alts.map((a, k) => {
           const chosen = a.token === step.token;
@@ -228,7 +232,7 @@ function Alternatives({ take, step }: { take: Take; step: Step }) {
                   <span className="bar block h-full rounded-full" style={{ transform: `scaleX(${clamp01(a.p / max)})`, background: chosen ? "var(--accent)" : "var(--ink-3)" }} />
                 </span>
               </div>
-              {!chosen ? (
+              {!chosen && canFork(take) ? (
                 <button
                   type="button"
                   onClick={() => fork(take.id, step.index, a.token)}

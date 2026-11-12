@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import type { PerformEvent } from "@/lib/protocol";
 import { POST } from "./route";
-import { DEMO_VOICE_INFOS, SCRIPTS } from "@/engine/demo";
+import { DEMO_VOICE_INFOS, RECORDINGS } from "@/engine/demo";
 
 beforeAll(() => {
   delete process.env.OPENROUTER_API_KEY;
@@ -11,7 +11,7 @@ const post = (body: unknown, signal?: AbortSignal) =>
   POST(new Request("http://localhost/api/perform", { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body), signal }));
 
 const goodBody = {
-  prompt: SCRIPTS[4].prompt,
+  prompt: RECORDINGS[0].prompt,
   voices: DEMO_VOICE_INFOS.map((v) => ({ id: v.id, weight: 1 })),
   blend: "mixture",
   temperature: 0.7,
@@ -28,7 +28,7 @@ function parseSse(text: string): PerformEvent[] {
 
 describe("POST /api/perform", () => {
   it("rejects bad bodies with a 400 JSON error before streaming", async () => {
-    for (const body of ["{not json", { prompt: "" }, { ...goodBody, voices: [{ id: "demo:nobody", weight: 1 }] }]) {
+    for (const body of ["{not json", { prompt: "" }, { ...goodBody, voices: [] }]) {
       const res = await post(body);
       expect(res.status).toBe(400);
       expect(res.headers.get("content-type")).toMatch(/json/);

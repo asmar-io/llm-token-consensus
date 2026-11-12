@@ -73,7 +73,7 @@ export function Finale({ take }: { take: Take }) {
         <Fig label="Tokens" value={String(summary.tokens)} />
         <Fig label="Mean agreement" value={num(summary.agreement)} sub={agreementWord(summary.agreement)} />
         <Fig label="Time" value={ms(summary.elapsedMs)} />
-        <Fig label="Cost" value={take.voices.every((v) => v.simulated) ? "free" : usd(summary.costUsd)} sub={take.voices.every((v) => v.simulated) ? "simulated voices" : undefined} />
+        <Fig label="Cost" value={usd(summary.costUsd)} sub={take.mode === "demo" && !take.mock ? "when recorded" : undefined} />
       </dl>
 
       <div className="mt-6 grid gap-6 md:grid-cols-2">

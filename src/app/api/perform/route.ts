@@ -1,5 +1,6 @@
 import { perform, validateRequest } from "@/engine/perform";
-import { resolveVoices } from "@/engine/registry";
+import { currentMode, resolveVoices } from "@/engine/registry";
+import { replay } from "@/engine/demo";
 import type { PerformEvent } from "@/lib/protocol";
 
 // Cache Components is enabled in next.config.ts, so the `dynamic` and `runtime`
@@ -20,11 +21,11 @@ export async function POST(req: Request) {
   if (!v.ok) return bad(v.error);
   const request = v.request;
 
-  const resolved = resolveVoices(
-    request.voices.map((x) => x.id),
-    { seed: request.seed },
-  );
-  if (!resolved.ok) return bad(resolved.error, { unknownVoices: resolved.unknown });
+  // Demo: replay a recorded live performance. Live: resolve the chosen voices.
+  const mode = currentMode();
+  const resolved = mode === "live" ? resolveVoices(request.voices.map((x) => x.id)) : null;
+  if (resolved && !resolved.ok) return bad(resolved.error, { unknownVoices: resolved.unknown });
+  if (resolved && resolved.voices.length < 2) return bad("Pick at least two voices: a choir of one has nothing to blend.");
 
   // Client disconnect: Next aborts req.signal, and the stream's cancel() runs.
   // Either one aborts every in-flight voice call and ends the generator.
@@ -33,7 +34,7 @@ export async function POST(req: Request) {
   if (req.signal.aborted) ac.abort();
   else req.signal.addEventListener("abort", onAbort, { once: true });
 
-  const gen = perform(request, resolved.voices, ac.signal, { mode: resolved.mode });
+  const gen = resolved?.ok ? perform(request, resolved.voices, ac.signal, { mode: "live" }) : replay(request, ac.signal);
   const encoder = new TextEncoder();
   const frame = (e: PerformEvent) => encoder.encode(`data: ${JSON.stringify(e)}\n\n`);
   let finished = false;

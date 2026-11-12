@@ -352,3 +352,19 @@ input[type="range"].fader:disabled {
     animation: none !important;
   }
 }
+
+/* FAQ answers */
+.faq-body > * + * {
+  margin-top: 0.7rem;
+}
+.faq-body ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-left: 1.1rem;
+  list-style: disc;
+}
+.faq-body strong {
+  color: var(--ink);
+  font-weight: 600;
+}

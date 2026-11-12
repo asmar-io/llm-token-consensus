@@ -117,9 +117,9 @@ function ModeBadge({ mode, note, mock }: { mode: "demo" | "live"; note?: string;
       </button>
       {open && (
         <div role="dialog" aria-label="About this choir" className="absolute right-0 top-10 z-40 w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-line-strong bg-raised p-3 text-sm text-ink-2 shadow-[0_12px_32px_rgb(0_0_0/0.3)]">
-          <p className="font-medium text-ink">{live ? "Live: real models via OpenRouter" : "Demo: simulated voices"}</p>
+          <p className="font-medium text-ink">{live ? "Live: real models via OpenRouter" : "Demo: recorded live performances"}</p>
           <p className="mt-1 leading-snug">
-            {note ?? (live ? "Each token is decided by real model calls. Calls cost money and take longer." : "The voices are simulated, so it runs instantly and costs nothing.")}
+            {note ?? (live ? "Each token is decided by real model calls. Calls cost money and take longer." : "Real performances recorded from the live choir, replayed exactly as they happened.")}
           </p>
         </div>
       )}
