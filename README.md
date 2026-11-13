@@ -2,6 +2,8 @@
 
 **Several LLMs write one answer together, one token at a time, and you can click any token to see how each model voted.**
 
+**[▶ Try the live demo](https://asmar-io.github.io/llm-token-consensus/)** (no install, no key: replays real recorded performances)
+
 ![Chorus performing a prompt with the token inspector open](docs/screenshot.jpg)
 
 A normal LLM answer comes from one model, so one lab's training data and rules decide every word. Chorus asks several models from different labs the same question at every step: *given the answer so far, what comes next, and how sure are you?* It blends their probability distributions, samples one token from the blend, appends it, and asks again.
@@ -206,6 +208,9 @@ Every verified model comes from a Chinese lab. No US or European open-weight mod
 To add a model, add an entry with its route to [`catalog.ts`](src/engine/voices/catalog.ts) and run the smoke test against it.
 
 ## Demo mode
+
+The hosted demo at **https://asmar-io.github.io/llm-token-consensus/** is a static build published to GitHub Pages by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) on every push to `main`. Pages has no server, so that build drops the API routes and replays the recordings in the browser (`NEXT_PUBLIC_STATIC=1`).
+
 
 Without a key, the app replays **recorded live performances**: the exact event streams produced by real model calls, stored in [`src/engine/demo/recordings`](src/engine/demo/recordings). Every probability, ballot, latency and cost shown is what happened in that run. Nothing is simulated.
 

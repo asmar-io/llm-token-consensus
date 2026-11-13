@@ -1,5 +1,6 @@
 import type { ChoirInfo, PerformEvent, PerformRequest } from "@/lib/protocol";
 import { MOCK_CHOIR, mockPerform } from "./mock";
+import { STATIC_BUILD, staticChoir, staticPerform } from "./static";
 
 /** Reads `data: <json>\n\n` frames from a fetch body, tolerating frames split across chunks. */
 export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<PerformEvent> {
@@ -43,6 +44,7 @@ function parseFrame(raw: string): PerformEvent | null {
 }
 
 export async function fetchChoir(timeoutMs = 4000): Promise<ChoirInfo> {
+  if (STATIC_BUILD) return staticChoir();
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -61,6 +63,10 @@ export { MOCK_CHOIR };
 export async function* perform(req: PerformRequest, signal: AbortSignal, useMock: boolean): AsyncGenerator<PerformEvent> {
   if (useMock) {
     yield* mockPerform(req, signal);
+    return;
+  }
+  if (STATIC_BUILD) {
+    yield* staticPerform(req, signal);
     return;
   }
   const res = await fetch("/api/perform", {
